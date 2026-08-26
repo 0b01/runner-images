@@ -2,6 +2,7 @@ name: Filesystem driver smoke
 
 on:
   workflow_dispatch:
+  pull_request:
 
 jobs:
   dokany:
