@@ -1,0 +1,44 @@
+name: Filesystem driver smoke
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dokany:
+    runs-on: windows-2025
+    steps:
+      - name: Install Dokany
+        shell: pwsh
+        run: |
+          $url = 'https://github.com/dokan-dev/dokany/releases/download/v2.3.1.1000/Dokan_x64.msi'
+          Invoke-WebRequest $url -OutFile "$env:RUNNER_TEMP\Dokan_x64.msi"
+          if ((Get-FileHash "$env:RUNNER_TEMP\Dokan_x64.msi" -Algorithm SHA256).Hash -ne '69ff8cb37bfec3a75921c85ffd1c6370b50a9ec4ecef2cf3a009d488dcbf5465') { throw 'checksum mismatch' }
+          $process = Start-Process msiexec.exe -ArgumentList '/i', "$env:RUNNER_TEMP\Dokan_x64.msi", '/qn', '/norestart' -Wait -PassThru
+          if ($process.ExitCode -notin 0, 3010) { throw "installer exited $($process.ExitCode)" }
+
+      - name: Verify kernel driver
+        shell: pwsh
+        run: |
+          $driver = Get-CimInstance Win32_SystemDriver -Filter "Name = 'dokan2'"
+          if (-not $driver) { throw 'dokan2 driver is not registered' }
+          $path = Join-Path $env:SystemRoot 'System32\drivers\dokan2.sys'
+          if ((Get-AuthenticodeSignature $path).Status -ne 'Valid') { throw 'driver signature is invalid' }
+          Write-Host "Dokany service state: $($driver.State), path: $($driver.PathName)"
+
+  macfuse:
+    runs-on: macos-15-intel
+    steps:
+      - name: Install macFUSE
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/macfuse.dmg" https://github.com/macfuse/macfuse/releases/download/macfuse-5.3.3/macfuse-5.3.3.dmg
+          echo '7a0b7b66c0e7f8932707d1215dc9cf486e178d097ae0a2dcdf17d8530566aa15  '"$RUNNER_TEMP/macfuse.dmg" | shasum -a 256 -c -
+          volume=$(hdiutil attach "$RUNNER_TEMP/macfuse.dmg" -nobrowse -readonly | sed -n 's#^.*\(/Volumes/.*\)$#\1#p' | head -1)
+          sudo installer -pkg "$volume/Extras/macFUSE 5.3.3.pkg" -target /
+          hdiutil detach "$volume"
+
+      - name: Verify package and attempt load
+        run: |
+          pkgutil --pkg-info io.macfuse.installer.components.core
+          codesign -dv --verbose=4 /Library/Filesystems/macfuse.fs 2>&1 | grep 'TeamIdentifier=3T5GSNBU6W'
+          sudo /Library/Filesystems/macfuse.fs/Contents/Resources/load_macfuse
+          kmutil showloaded | grep -E 'io\.macfuse\.filesystems\.macfuse|io\.macfuse\.filesystems\.osxfuse'
